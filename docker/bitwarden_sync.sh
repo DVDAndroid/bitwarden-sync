@@ -16,7 +16,7 @@ resolve_destination_urls() {
     return 1
   fi
 
-  if [ -n "$BW_API_URL_DEST" ]; then
+  if [ -n "${BW_API_URL_DEST:-}" ]; then
     DEST_API_URL="${BW_API_URL_DEST%/}"
   elif [[ "$server" =~ ^(https?://)vault\.bitwarden\.(com|eu)$ ]]; then
     DEST_API_URL="${BASH_REMATCH[1]}api.bitwarden.${BASH_REMATCH[2]}"
@@ -24,7 +24,7 @@ resolve_destination_urls() {
     DEST_API_URL="$server/api"
   fi
 
-  if [ -n "$BW_IDENTITY_URL_DEST" ]; then
+  if [ -n "${BW_IDENTITY_URL_DEST:-}" ]; then
     DEST_IDENTITY_URL="${BW_IDENTITY_URL_DEST%/}"
   elif [[ "$server" =~ ^(https?://)vault\.bitwarden\.(com|eu)$ ]]; then
     DEST_IDENTITY_URL="${BASH_REMATCH[1]}identity.bitwarden.${BASH_REMATCH[2]}"
@@ -61,10 +61,10 @@ finish() {
   [ "$duration" -lt 0 ] && duration=0
   finished=$(date 2>/dev/null || echo unknown)
 
-  echo "### Run summary: status=$SYNC_STATUS stage=$SYNC_STAGE duration=${duration}s exit=$rc backup_items=$BACKUP_ITEMS backup_folders=$BACKUP_FOLDERS cli_source=$CLI_SOURCE_VERSION cli_dest=$CLI_DEST_VERSION ###"
+  echo "### Run summary: status=$SYNC_STATUS stage=$SYNC_STAGE duration=${duration}s exit=$rc backup_items=${BACKUP_ITEMS:-0} backup_folders=${BACKUP_FOLDERS:-0} cli_source=${CLI_SOURCE_VERSION:-unknown} cli_dest=${CLI_DEST_VERSION:-unknown} ###"
 
   # Persist last-run status (best-effort; lives in the app-data volume).
-  if [ -n "$BW_STATUS_FILE" ] && command -v jq >/dev/null 2>&1; then
+  if [ -n "${BW_STATUS_FILE:-}" ] && command -v jq >/dev/null 2>&1; then
     if jq -n \
         --arg status "$SYNC_STATUS" \
         --arg stage "$SYNC_STAGE" \
@@ -74,8 +74,8 @@ finish() {
         --argjson exit_code "$rc" \
         --argjson items "${BACKUP_ITEMS:-0}" \
         --argjson folders "${BACKUP_FOLDERS:-0}" \
-        --arg cli_source "$CLI_SOURCE_VERSION" \
-        --arg cli_dest "$CLI_DEST_VERSION" \
+        --arg cli_source "${CLI_SOURCE_VERSION:-unknown}" \
+        --arg cli_dest "${CLI_DEST_VERSION:-unknown}" \
         '{status:$status, stage:$stage, started:$started, finished:$finished,
           duration_seconds:$duration, exit_code:$exit_code,
           backup:{items:$items, folders:$folders},
@@ -85,8 +85,7 @@ finish() {
     fi
   fi
 
-  # Healthcheck ping (success, or /fail with the failing stage).
-  if [ -n "$HEALTHCHECK_URL" ] && [ -n "$HEALTHCHECK_PING" ]; then
+  if [ -n "${HEALTHCHECK_URL:-}" ] && [ -n "${HEALTHCHECK_PING:-}" ]; then
     if [ "$SYNC_STATUS" = "success" ]; then
       echo "### Health Check - Success ###"
       curl -fsS -m 10 --retry 5 "$HEALTHCHECK_URL/$HEALTHCHECK_PING?rid=$RID" >/dev/null 2>&1 || true
@@ -123,16 +122,15 @@ try_source_login_unlock() {
       echo "# ERROR: Logged in but failed to unlock the source vault (check BW_PASS_SOURCE) #" >&2
       return 2
     fi
-    # Login failed — only transport-class errors are worth retrying/falling back.
     if ! printf '%s' "$err" | grep -qiE 'premature close|fetch failed|fetcherror|invalid response body|econnreset|etimedout|esockettimedout|socket hang up|enotfound|eai_again|und_err|network|terminated'; then
-      echo "# ERROR: Source login failed (not a transport error): $err #" >&2
+      echo "# ERROR: Source login failed (not a transport error) #" >&2
       return 3
     fi
     if [ "$attempt" -ge "$tries" ]; then
-      echo "# Source login failed after $tries attempts on CLI $(bw-old --version 2>/dev/null): $err #" >&2
+      echo "# Source login failed after $tries attempts on CLI $(bw-old --version 2>/dev/null): [Transport Error Hidden] #" >&2
       return 1
     fi
-    echo "# Source login attempt $attempt/$tries failed (transport): $err; retrying in ${delay}s... #" >&2
+    echo "# Source login attempt $attempt/$tries failed (transport). Retrying in ${delay}s... #" >&2
     attempt=$((attempt + 1))
     sleep "$delay"
     delay=$((delay * 2))
@@ -158,7 +156,7 @@ source_login_unlock() {
   for v in $candidates; do
     if [ "$first" = 0 ]; then
       if ! command -v reinstall_bw_old >/dev/null 2>&1; then
-        break  # no reinstall capability (e.g. outside Docker) — can't fall back
+        break
       fi
       echo "# Source login failing on CLI $installed; switching to CLI $v and retrying... #" >&2
       if ! reinstall_bw_old "$v"; then
@@ -173,12 +171,12 @@ source_login_unlock() {
     rc=$?
     case "$rc" in
       0) return 0 ;;
-      2 | 3) return 1 ;;        # password/auth/config — version change won't help
-      *) ;;                     # transport failure — try the next CLI version
+      2 | 3) return 1 ;;
+      *) ;;
     esac
   done
 
-  echo "# ERROR: Source login failed on all CLI versions tried: $candidates #" >&2
+  echo "# ERROR: Source login failed on all CLI versions tried #" >&2
   return 1
 }
 
@@ -186,11 +184,13 @@ source_login_unlock() {
 # the meaningful output and returns 0 only if the CLI reports a completed import.
 try_import() {
   local out
+  # Esporta la variabile d'ambiente di sessione per evitare il passaggio come argomento visibile in ps aux
+  export BW_SESSION="$BW_SESSION_DEST"
   out=$(printf "%s\n" "$BW_PASS_DEST" | \
-    script -qfc "bw-new --session \"$BW_SESSION_DEST\" import bitwardenjson \"$DEST_LATEST_BACKUP_JSON\"" \
+    script -qfc "bw-new import bitwardenjson \"$DEST_LATEST_BACKUP_JSON\"" \
     /dev/null 2>&1 | tr -d '\r' | sed 's/\x1b\[[0-9;]*[A-Za-z]//g')
 
-  # Show only meaningful lines — filter the echoed password, prompt noise, blanks.
+  unset BW_SESSION
   printf '%s\n' "$out" | grep -vF "$BW_PASS_DEST" | grep -v '^. Master password' | grep -v '^[[:space:]]*$'
 
   printf '%s\n' "$out" | grep -qi "imported"
@@ -222,7 +222,7 @@ run_import_with_fallback() {
       fi
       installed="$(bw-new --version 2>/dev/null || echo "$v")"
       CLI_DEST_VERSION="$installed"
-      # Refresh the session for the freshly installed CLI version.
+      
       bw-new logout >/dev/null 2>&1 || true
       bw-new config server "$BW_SERVER_DEST" >/dev/null 2>&1
       bw-new login --apikey >/dev/null 2>&1
@@ -238,7 +238,7 @@ run_import_with_fallback() {
     fi
   done
 
-  echo "# ERROR: Import failed on all destination CLI versions tried: $candidates #" >&2
+  echo "# ERROR: Import failed on all destination CLI versions tried #" >&2
   return 1
 }
 
@@ -259,7 +259,7 @@ resolve_device_identifier() {
   local identifier_file="${BW_DEVICE_IDENTIFIER_FILE:-$BITWARDENCLI_APPDATA_DIR/device-identifier}"
   local identifier
 
-  if [ -n "$BW_DEVICE_IDENTIFIER" ]; then
+  if [ -n "${BW_DEVICE_IDENTIFIER:-}" ]; then
     DEST_DEVICE_IDENTIFIER="$BW_DEVICE_IDENTIFIER"
     return
   fi
@@ -296,8 +296,8 @@ MAIN_PID="$$"
 START_EPOCH=$(date +%s)
 START_TIME=$(date)
 RID=$(uuidgen)
-SYNC_STATUS="error" # flipped to "success" only after a clean finish
-SYNC_STAGE="init"   # last stage reached; recorded on failure for debugging
+SYNC_STATUS="error"
+SYNC_STAGE="init"
 BACKUP_ITEMS=0
 BACKUP_FOLDERS=0
 CLI_SOURCE_VERSION="unknown"
@@ -333,10 +333,10 @@ resolve_secret() {
   local keyfile_var="${var_name}_KEYFILE"
   local file_var="${var_name}_FILE"
 
-  local enc_file_val="${!enc_file_var}"
-  local keyfile_val="${!keyfile_var}"
-  local file_val="${!file_var}"
-  local plain_val="${!var_name}"
+  local enc_file_val="${!enc_file_var:-}"
+  local keyfile_val="${!keyfile_var:-}"
+  local file_val="${!file_var:-}"
+  local plain_val="${!var_name:-}"
 
   if [ -n "$enc_file_val" ] && [ -n "$keyfile_val" ]; then
     if [ ! -f "$enc_file_val" ]; then
@@ -365,9 +365,7 @@ resolve_secret() {
   fi
 }
 
-# Resolve sensitive values – supports plaintext env vars, plain files (Docker
-# secrets), or OpenSSL-encrypted files, depending on what is configured.
-BW_TAR_PASS=$(resolve_secret BW_TAR_PASS)
+export BW_TAR_PASS=$(resolve_secret BW_TAR_PASS)
 BW_PASS_SOURCE=$(resolve_secret BW_PASS_SOURCE)
 BW_PASS_DEST=$(resolve_secret BW_PASS_DEST)
 BW_CLIENTID_SOURCE=$(resolve_secret BW_CLIENTID_SOURCE)
@@ -380,8 +378,7 @@ echo "################################"
 export BW_CLIENTID="$BW_CLIENTID_SOURCE"
 export BW_CLIENTSECRET="$BW_CLIENTSECRET_SOURCE"
 
-# Check if HEALTHCHECK_URL and HEALTHCHECK_PING are set
-if [ -n "$HEALTHCHECK_URL" ] && [ -n "$HEALTHCHECK_PING" ]; then
+if [ -n "${HEALTHCHECK_URL:-}" ] && [ -n "${HEALTHCHECK_PING:-}" ]; then
     URL=$HEALTHCHECK_URL
     PING=$HEALTHCHECK_PING
 
@@ -400,6 +397,7 @@ echo "# Start of Backup Process #"
 
 # We need a backups directory
 mkdir -p /app/backups
+chmod 700 /app/backups
 
 # Set the filename for our json export as variable
 SOURCE_EXPORT_OUTPUT_BASE="bw_export_"
@@ -408,20 +406,23 @@ TIMESTAMP=$(date "+%Y%m%d%H%M%S")
 mkdir -p /app/backups
 chmod 700 /app/backups
 umask 077
-SOURCE_OUTPUT_FILE_JSON=/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.json
 
-# Delete previous backups over 30 days old
+# Utilizzo di un'area sicura /dev/shm (RAM) se disponibile, altrimenti fallback locale isolato
+TMP_VARS_DIR="/dev/shm"
+if [ ! -d "$TMP_VARS_DIR" ] || [ ! -w "$TMP_VARS_DIR" ]; then
+  TMP_VARS_DIR="/app/backups"
+fi
+SOURCE_OUTPUT_FILE_JSON="$TMP_VARS_DIR/${SOURCE_EXPORT_OUTPUT_BASE}${TIMESTAMP}.json"
+
 echo "# Deleting previous backups older than 30 days... #"
 # Remove encrypted archives older than 30 days
 find /app/backups -type f -name "bw_export_*.tar.gz.enc" -mtime +30 -exec rm -f {} +
-# Remove exported JSON files older than 30 days
-find /app/backups -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -mtime +30 -exec rm -f {} +
+find /app/backups -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -mtime +30 -exec rm -f {} + 2>/dev/null || true
 
 # Login to our Server (using old CLI for Vaultwarden compatibility) and unlock.
 # source_login_unlock handles logout/config/login/unlock with retry + backoff.
 SYNC_STAGE="source_login"
-echo "# Logging into Source Bitwarden Server (using CLI $(bw-old --version 2>/dev/null || echo unknown))... #"
-echo "# Unlocking the vault... #"
+echo "# Logging into Source Bitwarden Server... #"
 if ! source_login_unlock; then
   echo "# ERROR: Failed to unlock source vault #"
   exit 1
@@ -443,23 +444,16 @@ echo "# Exported $BACKUP_ITEMS items, $BACKUP_FOLDERS folders #"
 
 # Add file to encrypted tar
 SYNC_STAGE="backup_encrypt"
-# Create a temporary passfile to avoid leaking the password in process args
-file_to_compress="$SOURCE_OUTPUT_FILE_JSON"
-umask 177
-TMP_PASSFILE=$(mktemp)
-printf '%s' "$BW_TAR_PASS" > "$TMP_PASSFILE"
-chmod 600 "$TMP_PASSFILE"
-tar -czf - "$file_to_compress" | \
-  openssl enc -aes-256-cbc -pbkdf2 -pass file:"$TMP_PASSFILE" -out "/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.tar.gz.enc"
-rm -f "$TMP_PASSFILE"
+# Crittografia nativa passata in modalità sicura tramite ambiente senza file temporanei intermedi per la chiave
+tar -czf - -C "$TMP_VARS_DIR" "${SOURCE_EXPORT_OUTPUT_BASE}${TIMESTAMP}.json" | \
+  openssl enc -aes-256-cbc -pbkdf2 -pass env:BW_TAR_PASS -out "/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.tar.gz.enc"
 
-# Cleanup
 rm -f "$SOURCE_OUTPUT_FILE_JSON"
 
 echo "# End of Backup Process #"
 echo "### Backup - End ###"
 
-### End of Backup
+##### Restoring process
 
 # Restoring process
 echo "### Restore - Start ###"
@@ -489,8 +483,8 @@ SYNC_STAGE="dest_login"
 CLI_DEST_VERSION="$(bw-new --version 2>/dev/null || echo unknown)"
 echo "# Logging into Destination Bitwarden Server (using CLI $CLI_DEST_VERSION)... #"
 bw-new logout 2>/dev/null || true
-bw-new config server "$BW_SERVER_DEST"
-bw-new login --apikey
+bw-new config server "$BW_SERVER_DEST" >/dev/null
+bw-new login --apikey >/dev/null
 
 BW_SESSION_DEST=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw)
 
@@ -502,17 +496,14 @@ fi
 # Find and decrypt the latest backup
 DEST_LATEST_BACKUP_TAR=$(find /app/backups/bw_export_*.tar.gz.enc -type f -exec ls -t1 {} + | head -1)
 echo "# Decrypting and extracting the latest backup... #"
-# Extract into a temporary directory with restricted permissions (vault data is sensitive)
+
 umask 077
-TMP_EXTRACT_DIR=$(mktemp -d)
+TMP_EXTRACT_DIR=$(mktemp -d "$TMP_VARS_DIR/bw_sync_XXXXXX")
 chmod 700 "$TMP_EXTRACT_DIR"
-umask 077
-TMP_PASSFILE=$(mktemp)
-printf '%s' "$BW_TAR_PASS" > "$TMP_PASSFILE"
-chmod 600 "$TMP_PASSFILE"
-openssl enc -d -aes-256-cbc -pbkdf2 -pass file:"$TMP_PASSFILE" -in "$DEST_LATEST_BACKUP_TAR" | \
+
+openssl enc -d -aes-256-cbc -pbkdf2 -pass env:BW_TAR_PASS -in "$DEST_LATEST_BACKUP_TAR" | \
   tar -xzf - -C "$TMP_EXTRACT_DIR"
-# Ensure extracted files have restricted permissions
+
 chmod -R 700 "$TMP_EXTRACT_DIR"
 rm -f "$TMP_PASSFILE"
 DEST_LATEST_BACKUP_JSON=$(find "$TMP_EXTRACT_DIR" -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -exec ls -t1 {} + | head -1)
@@ -520,14 +511,17 @@ DEST_LATEST_BACKUP_JSON=$(find "$TMP_EXTRACT_DIR" -type f -name "${SOURCE_EXPORT
 chmod 600 "$DEST_LATEST_BACKUP_JSON"
 echo "# Backup: $(jq '.items | length' "$DEST_LATEST_BACKUP_JSON") items, $(jq '.folders | length' "$DEST_LATEST_BACKUP_JSON") folders #"
 
-# If BW_IMPORT_LIMIT is set, truncate to N items (one of each type) for testing
-if [ -n "$BW_IMPORT_LIMIT" ]; then
-  echo "# TEST MODE: Limiting import to $BW_IMPORT_LIMIT items per type #"
-  jq --argjson n "$BW_IMPORT_LIMIT" '
-    .items |= (group_by(.type) | map(.[0:$n]) | add // [])
-  ' "$DEST_LATEST_BACKUP_JSON" > "${DEST_LATEST_BACKUP_JSON}.tmp" && \
-    mv "${DEST_LATEST_BACKUP_JSON}.tmp" "$DEST_LATEST_BACKUP_JSON"
-  echo "# Test import: $(jq '.items | length' "$DEST_LATEST_BACKUP_JSON") items #"
+if [ -n "${BW_IMPORT_LIMIT:-}" ]; then
+  if [[ "$BW_IMPORT_LIMIT" =~ ^[0-9]+$ ]]; then
+    echo "# TEST MODE: Limiting import to $BW_IMPORT_LIMIT items per type #"
+    jq --argjson n "$BW_IMPORT_LIMIT" '
+      .items |= (group_by(.type) | map(.[0:$n]) | add // [])
+    ' "$DEST_LATEST_BACKUP_JSON" > "${DEST_LATEST_BACKUP_JSON}.tmp" && \
+      mv "${DEST_LATEST_BACKUP_JSON}.tmp" "$DEST_LATEST_BACKUP_JSON"
+    echo "# Test import: $(jq '.items | length' "$DEST_LATEST_BACKUP_JSON") items #"
+  else
+    echo "# WARNING: BW_IMPORT_LIMIT is not a valid integer, skipping limitation #"
+  fi
 fi
 
 # Clear the destination vault via Bitwarden REST API (no PTY/CLI needed for deletion).
@@ -546,17 +540,15 @@ if ! TOKEN_RESPONSE=$(curl_api --fail -X POST "$DEST_IDENTITY_URL/connect/token"
   --data-urlencode "deviceType=8" \
   --data-urlencode "deviceIdentifier=$DEST_DEVICE_IDENTIFIER" \
   --data-urlencode "deviceName=${BW_DEVICE_NAME:-bitwarden-sync}"); then
-  echo "# ERROR: Failed to contact destination identity server: $DEST_IDENTITY_URL #" >&2
-  rm -f "$DEST_LATEST_BACKUP_JSON"
-  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+  echo "# ERROR: Failed to contact destination identity server #" >&2
+  rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 API_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
 
 if [ -z "$API_TOKEN" ]; then
   echo "# ERROR: Destination identity server returned no API access token #" >&2
-  rm -f "$DEST_LATEST_BACKUP_JSON"
-  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+  rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 echo "# API token obtained #"
@@ -565,9 +557,8 @@ SYNC_STAGE="dest_fetch"
 echo "# Fetching existing vault contents... #"
 if ! SYNC_DATA=$(curl_api --fail "$DEST_API_URL/sync?excludeDomains=true" \
   -H "Authorization: Bearer $API_TOKEN"); then
-  echo "# ERROR: Failed to fetch destination vault from $DEST_API_URL #" >&2
-  rm -f "$DEST_LATEST_BACKUP_JSON"
-  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+  echo "# ERROR: Failed to fetch destination vault #" >&2
+  rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 if ! printf '%s' "$SYNC_DATA" | jq -e '
@@ -576,8 +567,7 @@ if ! printf '%s' "$SYNC_DATA" | jq -e '
   (.folders | type == "array")
 ' >/dev/null 2>&1; then
   echo "# ERROR: Destination sync endpoint returned an invalid vault response #" >&2
-  rm -f "$DEST_LATEST_BACKUP_JSON"
-  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+  rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 
@@ -613,9 +603,8 @@ if [ "$CIPHER_COUNT" -gt 0 ]; then
       for id in "${BATCH_IDS[@]}"; do
         if ! STATUS=$(delete_api_resource "$DEST_API_URL/ciphers/$id" \
           -H "Authorization: Bearer $API_TOKEN"); then
-          echo "# ERROR: Failed to delete cipher $id #" >&2
-          rm -f "$DEST_LATEST_BACKUP_JSON"
-          [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+          echo "# ERROR: Failed to delete cipher #" >&2
+          rm -rf "$TMP_EXTRACT_DIR"
           exit 1
         fi
         TOTAL_DELETED=$((TOTAL_DELETED + 1))
@@ -631,9 +620,8 @@ mapfile -t DEST_FOLDER_IDS < <(printf '%s' "$FOLDER_IDS" | jq -r '.[]' 2>/dev/nu
 for id in "${DEST_FOLDER_IDS[@]}"; do
   if ! STATUS=$(delete_api_resource "$DEST_API_URL/folders/$id" \
     -H "Authorization: Bearer $API_TOKEN"); then
-    echo "# ERROR: Failed to delete folder $id #" >&2
-    rm -f "$DEST_LATEST_BACKUP_JSON"
-    [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+    echo "# ERROR: Failed to delete folder #" >&2
+    rm -rf "$TMP_EXTRACT_DIR"
     exit 1
   fi
   echo "# Deleted folder $id (HTTP $STATUS) #"
@@ -645,12 +633,11 @@ SYNC_STAGE="import"
 echo "# Importing backup into destination vault... #"
 if ! run_import_with_fallback; then
   echo "# ERROR: Import did not complete #"
-  rm -f "$DEST_LATEST_BACKUP_JSON"
-  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
+  rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 
-rm -f "$DEST_LATEST_BACKUP_JSON"
+rm -rf "$TMP_EXTRACT_DIR"
 
 echo "# End of Restore Process #"
 echo "### Restore - End ###"
@@ -660,6 +647,7 @@ bw-new logout > /dev/null 2>&1 || true
 
 unset BW_CLIENTID
 unset BW_CLIENTSECRET
+unset BW_TAR_PASS
 
 # Mark success — finish() (EXIT trap) writes the status file, prints the run
 # summary, and sends the healthcheck success ping.
