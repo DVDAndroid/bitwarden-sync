@@ -180,22 +180,23 @@ try_source_login_unlock() {
     bw-old logout >/dev/null 2>&1 || true
     bw-old config server "$BW_SERVER_SOURCE" >/dev/null 2>&1
     if err=$(bw-old login --apikey 2>&1); then
-      if session=$(printf '%s' "$BW_PASS_SOURCE" | bw-old unlock --raw 2>/dev/null) && [ -n "$session" ]; then
+      if session=$(bw-old unlock "$BW_PASS_SOURCE" --raw 2>/dev/null) && [ -n "$session" ]; then
         BW_SESSION_SOURCE="$session"
         return 0
       fi
       echo "# ERROR: Logged in but failed to unlock the source vault (check BW_PASS_SOURCE) #" >&2
       return 2
     fi
+    # Login failed — only transport-class errors are worth retrying/falling back.
     if ! printf '%s' "$err" | grep -qiE 'premature close|fetch failed|fetcherror|invalid response body|econnreset|etimedout|esockettimedout|socket hang up|enotfound|eai_again|und_err|network|terminated'; then
-      echo "# ERROR: Source login failed (not a transport error) #" >&2
+      echo "# ERROR: Source login failed (not a transport error): $err #" >&2
       return 3
     fi
     if [ "$attempt" -ge "$tries" ]; then
-      echo "# Source login failed after $tries attempts on CLI $(bw-old --version 2>/dev/null): [Transport Error Hidden] #" >&2
+      echo "# Source login failed after $tries attempts on CLI $(bw-old --version 2>/dev/null): $err #" >&2
       return 1
     fi
-    echo "# Source login attempt $attempt/$tries failed (transport). Retrying in ${delay}s... #" >&2
+    echo "# Source login attempt $attempt/$tries failed (transport): $err; retrying in ${delay}s... #" >&2
     attempt=$((attempt + 1))
     sleep "$delay"
     delay=$((delay * 2))
@@ -291,9 +292,14 @@ run_import_with_fallback() {
       bw-new logout >/dev/null 2>&1 || true
       bw-new config server "$BW_SERVER_DEST" >/dev/null 2>&1
       bw-new login --apikey >/dev/null 2>&1
-      BW_SESSION_DEST=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw 2>/dev/null)
-      if [ -z "$BW_SESSION_DEST" ]; then
-        echo "# WARNING: Could not unlock destination with CLI $v; trying next candidate #" >&2
+      local unlock_dest_output unlock_dest_rc
+      unlock_dest_output=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw 2>&1)
+      unlock_dest_rc=$?
+      if [ "$unlock_dest_rc" -eq 0 ] && [ -n "$unlock_dest_output" ]; then
+        BW_SESSION_DEST="$unlock_dest_output"
+      else
+        local dest_error=$(printf '%s\n' "$unlock_dest_output" | head -1)
+        echo "# WARNING: Could not unlock destination with CLI $v (rc=$unlock_dest_rc, $dest_error); trying next candidate #" >&2
         continue
       fi
     fi
@@ -551,12 +557,16 @@ bw-new logout 2>/dev/null || true
 bw-new config server "$BW_SERVER_DEST" >/dev/null
 bw-new login --apikey >/dev/null
 
-BW_SESSION_DEST=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw)
+local unlock_dest_output unlock_dest_rc
+unlock_dest_output=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw 2>&1)
+unlock_dest_rc=$?
 
-if [ -z "$BW_SESSION_DEST" ]; then
-  echo "# ERROR: Failed to unlock destination vault #"
+if [ "$unlock_dest_rc" -ne 0 ] || [ -z "$unlock_dest_output" ]; then
+  local dest_error=$(printf '%s\n' "$unlock_dest_output" | head -1)
+  echo "# ERROR: Failed to unlock destination vault (rc=$unlock_dest_rc). Check BW_PASS_DEST. Details: $dest_error #"
   exit 1
 fi
+BW_SESSION_DEST="$unlock_dest_output"
 
 # Find and decrypt the latest backup
 DEST_LATEST_BACKUP_TAR=$(find /app/backups/bw_export_*.tar.gz.enc -type f -exec ls -t1 {} + | head -1)
