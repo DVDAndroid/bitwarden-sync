@@ -93,6 +93,6 @@ RUN chmod 0755 /app/script.sh /app/entrypoint.sh
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Start cron and log output to console
-CMD ["sh", "-c", "crond -f -L /dev/stdout -c /var/spool/cron/crontabs"]
+# CMD ["sh", "-c", "crond -f -L /dev/stdout -c /var/spool/cron/crontabs"]
 
 USER bitwarden-sync

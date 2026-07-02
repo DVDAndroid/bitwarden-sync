@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euo pipefail
+# set -x
 
 # Shared CLI install helpers (provides reinstall_bw_old for auto-fallback).
 # Present only inside the Docker image; guarded so the script still parses
@@ -557,16 +557,11 @@ bw-new logout 2>/dev/null || true
 bw-new config server "$BW_SERVER_DEST" >/dev/null
 bw-new login --apikey >/dev/null
 
-local unlock_dest_output unlock_dest_rc
-unlock_dest_output=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw 2>&1)
-unlock_dest_rc=$?
-
-if [ "$unlock_dest_rc" -ne 0 ] || [ -z "$unlock_dest_output" ]; then
-  local dest_error=$(printf '%s\n' "$unlock_dest_output" | head -1)
-  echo "# ERROR: Failed to unlock destination vault (rc=$unlock_dest_rc). Check BW_PASS_DEST. Details: $dest_error #"
+BW_SESSION_DEST=$(bw-new unlock "$BW_PASS_DEST" --raw)
+if [ -z "$BW_SESSION_DEST" ]; then
+  echo "# ERROR: Failed to unlock destination vault #"
   exit 1
 fi
-BW_SESSION_DEST="$unlock_dest_output"
 
 # Find and decrypt the latest backup
 DEST_LATEST_BACKUP_TAR=$(find /app/backups/bw_export_*.tar.gz.enc -type f -exec ls -t1 {} + | head -1)
