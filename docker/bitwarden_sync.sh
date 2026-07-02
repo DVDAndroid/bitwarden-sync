@@ -13,9 +13,7 @@ validate_required_vars() {
   # Regular variables (must be set directly)
   local required_plain_vars=(
     "BW_SERVER_SOURCE"
-    "BW_ACCOUNT_SOURCE"
     "BW_SERVER_DEST"
-    "BW_ACCOUNT_DEST"
   )
   
   # Secret variables (can be set via plain env var, file, or encrypted file)
