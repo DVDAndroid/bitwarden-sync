@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Shared CLI install helpers (provides reinstall_bw_old for auto-fallback).
 # Present only inside the Docker image; guarded so the script still parses
@@ -115,7 +116,7 @@ try_source_login_unlock() {
     bw-old logout >/dev/null 2>&1 || true
     bw-old config server "$BW_SERVER_SOURCE" >/dev/null 2>&1
     if err=$(bw-old login --apikey 2>&1); then
-      if session=$(bw-old unlock "$BW_PASS_SOURCE" --raw 2>/dev/null) && [ -n "$session" ]; then
+      if session=$(printf '%s' "$BW_PASS_SOURCE" | bw-old unlock --raw 2>/dev/null) && [ -n "$session" ]; then
         BW_SESSION_SOURCE="$session"
         return 0
       fi
@@ -225,7 +226,7 @@ run_import_with_fallback() {
       bw-new logout >/dev/null 2>&1 || true
       bw-new config server "$BW_SERVER_DEST" >/dev/null 2>&1
       bw-new login --apikey >/dev/null 2>&1
-      BW_SESSION_DEST=$(bw-new unlock "$BW_PASS_DEST" --raw 2>/dev/null)
+      BW_SESSION_DEST=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw 2>/dev/null)
       if [ -z "$BW_SESSION_DEST" ]; then
         echo "# WARNING: Could not unlock destination with CLI $v; trying next candidate #" >&2
         continue
@@ -349,7 +350,7 @@ resolve_secret() {
     local decrypted
     decrypted=$(openssl enc -d -aes-256-cbc -in "$enc_file_val" -pass file:"$keyfile_val" 2>/dev/null)
     if [ $? -ne 0 ]; then
-      echo "ERROR: Failed to decrypt $enc_file_val: $decrypted" >&2
+      echo "ERROR: Failed to decrypt $enc_file_val" >&2
       exit 1
     fi
     echo "$decrypted"
@@ -403,14 +404,18 @@ mkdir -p /app/backups
 # Set the filename for our json export as variable
 SOURCE_EXPORT_OUTPUT_BASE="bw_export_"
 TIMESTAMP=$(date "+%Y%m%d%H%M%S")
+# Create backup directory with restricted permissions for vault data
+mkdir -p /app/backups
+chmod 700 /app/backups
+umask 077
 SOURCE_OUTPUT_FILE_JSON=/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.json
 
 # Delete previous backups over 30 days old
 echo "# Deleting previous backups older than 30 days... #"
-current_date=$(date +%Y-%m-%d)
-source_export_files=$(find /app/backups -type f -name "bw_export_*.tar.gz.enc")
-find $source_export_files -type f -mtime +30 -exec rm -f {} +
-rm -f -R $SOURCE_EXPORT_OUTPUT_BASE*.json
+# Remove encrypted archives older than 30 days
+find /app/backups -type f -name "bw_export_*.tar.gz.enc" -mtime +30 -exec rm -f {} +
+# Remove exported JSON files older than 30 days
+find /app/backups -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -mtime +30 -exec rm -f {} +
 
 # Login to our Server (using old CLI for Vaultwarden compatibility) and unlock.
 # source_login_unlock handles logout/config/login/unlock with retry + backoff.
@@ -438,9 +443,15 @@ echo "# Exported $BACKUP_ITEMS items, $BACKUP_FOLDERS folders #"
 
 # Add file to encrypted tar
 SYNC_STAGE="backup_encrypt"
+# Create a temporary passfile to avoid leaking the password in process args
 file_to_compress="$SOURCE_OUTPUT_FILE_JSON"
+umask 177
+TMP_PASSFILE=$(mktemp)
+printf '%s' "$BW_TAR_PASS" > "$TMP_PASSFILE"
+chmod 600 "$TMP_PASSFILE"
 tar -czf - "$file_to_compress" | \
-  openssl enc -aes-256-cbc -pbkdf2 -pass pass:"$BW_TAR_PASS" -out "/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.tar.gz.enc"
+  openssl enc -aes-256-cbc -pbkdf2 -pass file:"$TMP_PASSFILE" -out "/app/backups/$SOURCE_EXPORT_OUTPUT_BASE$TIMESTAMP.tar.gz.enc"
+rm -f "$TMP_PASSFILE"
 
 # Cleanup
 rm -f "$SOURCE_OUTPUT_FILE_JSON"
@@ -478,10 +489,10 @@ SYNC_STAGE="dest_login"
 CLI_DEST_VERSION="$(bw-new --version 2>/dev/null || echo unknown)"
 echo "# Logging into Destination Bitwarden Server (using CLI $CLI_DEST_VERSION)... #"
 bw-new logout 2>/dev/null || true
-bw-new config server $BW_SERVER_DEST
+bw-new config server "$BW_SERVER_DEST"
 bw-new login --apikey
 
-BW_SESSION_DEST=$(bw-new unlock "$BW_PASS_DEST" --raw)
+BW_SESSION_DEST=$(printf '%s' "$BW_PASS_DEST" | bw-new unlock --raw)
 
 if [ -z "$BW_SESSION_DEST" ]; then
   echo "# ERROR: Failed to unlock destination vault #"
@@ -491,9 +502,22 @@ fi
 # Find and decrypt the latest backup
 DEST_LATEST_BACKUP_TAR=$(find /app/backups/bw_export_*.tar.gz.enc -type f -exec ls -t1 {} + | head -1)
 echo "# Decrypting and extracting the latest backup... #"
-openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$BW_TAR_PASS" -in "$DEST_LATEST_BACKUP_TAR" | \
-  tar -xzf - -C /root
-DEST_LATEST_BACKUP_JSON=$(find /root/app/backups/bw_export_*.json -type f -exec ls -t1 {} + | head -1)
+# Extract into a temporary directory with restricted permissions (vault data is sensitive)
+umask 077
+TMP_EXTRACT_DIR=$(mktemp -d)
+chmod 700 "$TMP_EXTRACT_DIR"
+umask 077
+TMP_PASSFILE=$(mktemp)
+printf '%s' "$BW_TAR_PASS" > "$TMP_PASSFILE"
+chmod 600 "$TMP_PASSFILE"
+openssl enc -d -aes-256-cbc -pbkdf2 -pass file:"$TMP_PASSFILE" -in "$DEST_LATEST_BACKUP_TAR" | \
+  tar -xzf - -C "$TMP_EXTRACT_DIR"
+# Ensure extracted files have restricted permissions
+chmod -R 700 "$TMP_EXTRACT_DIR"
+rm -f "$TMP_PASSFILE"
+DEST_LATEST_BACKUP_JSON=$(find "$TMP_EXTRACT_DIR" -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -exec ls -t1 {} + | head -1)
+# Ensure backup JSON file has restricted permissions
+chmod 600 "$DEST_LATEST_BACKUP_JSON"
 echo "# Backup: $(jq '.items | length' "$DEST_LATEST_BACKUP_JSON") items, $(jq '.folders | length' "$DEST_LATEST_BACKUP_JSON") folders #"
 
 # If BW_IMPORT_LIMIT is set, truncate to N items (one of each type) for testing
@@ -524,6 +548,7 @@ if ! TOKEN_RESPONSE=$(curl_api --fail -X POST "$DEST_IDENTITY_URL/connect/token"
   --data-urlencode "deviceName=${BW_DEVICE_NAME:-bitwarden-sync}"); then
   echo "# ERROR: Failed to contact destination identity server: $DEST_IDENTITY_URL #" >&2
   rm -f "$DEST_LATEST_BACKUP_JSON"
+  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 API_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty' 2>/dev/null)
@@ -531,6 +556,7 @@ API_TOKEN=$(printf '%s' "$TOKEN_RESPONSE" | jq -r '.access_token // empty' 2>/de
 if [ -z "$API_TOKEN" ]; then
   echo "# ERROR: Destination identity server returned no API access token #" >&2
   rm -f "$DEST_LATEST_BACKUP_JSON"
+  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 echo "# API token obtained #"
@@ -541,6 +567,7 @@ if ! SYNC_DATA=$(curl_api --fail "$DEST_API_URL/sync?excludeDomains=true" \
   -H "Authorization: Bearer $API_TOKEN"); then
   echo "# ERROR: Failed to fetch destination vault from $DEST_API_URL #" >&2
   rm -f "$DEST_LATEST_BACKUP_JSON"
+  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 if ! printf '%s' "$SYNC_DATA" | jq -e '
@@ -550,6 +577,7 @@ if ! printf '%s' "$SYNC_DATA" | jq -e '
 ' >/dev/null 2>&1; then
   echo "# ERROR: Destination sync endpoint returned an invalid vault response #" >&2
   rm -f "$DEST_LATEST_BACKUP_JSON"
+  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 
@@ -587,6 +615,7 @@ if [ "$CIPHER_COUNT" -gt 0 ]; then
           -H "Authorization: Bearer $API_TOKEN"); then
           echo "# ERROR: Failed to delete cipher $id #" >&2
           rm -f "$DEST_LATEST_BACKUP_JSON"
+          [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
           exit 1
         fi
         TOTAL_DELETED=$((TOTAL_DELETED + 1))
@@ -604,6 +633,7 @@ for id in "${DEST_FOLDER_IDS[@]}"; do
     -H "Authorization: Bearer $API_TOKEN"); then
     echo "# ERROR: Failed to delete folder $id #" >&2
     rm -f "$DEST_LATEST_BACKUP_JSON"
+    [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
     exit 1
   fi
   echo "# Deleted folder $id (HTTP $STATUS) #"
@@ -616,6 +646,7 @@ echo "# Importing backup into destination vault... #"
 if ! run_import_with_fallback; then
   echo "# ERROR: Import did not complete #"
   rm -f "$DEST_LATEST_BACKUP_JSON"
+  [ -n "$TMP_EXTRACT_DIR" ] && rm -rf "$TMP_EXTRACT_DIR"
   exit 1
 fi
 
