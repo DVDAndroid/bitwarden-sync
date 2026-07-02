@@ -8,6 +8,43 @@ if [ -f /app/bw-cli-lib.sh ]; then
   . /app/bw-cli-lib.sh
 fi
 
+# Validate required environment variables
+validate_required_vars() {
+  local required_vars=(
+    "BW_SERVER_SOURCE"
+    "BW_ACCOUNT_SOURCE"
+    "BW_CLIENTID_SOURCE"
+    "BW_CLIENTSECRET_SOURCE"
+    "BW_PASS_SOURCE"
+    "BW_SERVER_DEST"
+    "BW_ACCOUNT_DEST"
+    "BW_CLIENTID_DEST"
+    "BW_CLIENTSECRET_DEST"
+    "BW_PASS_DEST"
+    "BW_TAR_PASS"
+  )
+  
+  local missing_vars=()
+  for var in "${required_vars[@]}"; do
+    if [ -z "${!var:-}" ]; then
+      missing_vars+=("$var")
+    fi
+  done
+  
+  if [ ${#missing_vars[@]} -gt 0 ]; then
+    echo "ERROR: The following required environment variables are not set:" >&2
+    printf '  - %s\n' "${missing_vars[@]}" >&2
+    echo "" >&2
+    echo "Please set these variables via:" >&2
+    echo "  1. Environment file (--env-file option)" >&2
+    echo "  2. Individual -e flags when running the container" >&2
+    echo "  3. In docker-compose.yml environment section" >&2
+    return 1
+  fi
+}
+
+validate_required_vars
+
 resolve_destination_urls() {
   local server="${BW_SERVER_DEST%/}"
 
