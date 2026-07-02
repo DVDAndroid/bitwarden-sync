@@ -10,35 +10,65 @@ fi
 
 # Validate required environment variables
 validate_required_vars() {
-  local required_vars=(
+  # Regular variables (must be set directly)
+  local required_plain_vars=(
     "BW_SERVER_SOURCE"
     "BW_ACCOUNT_SOURCE"
-    "BW_CLIENTID_SOURCE"
-    "BW_CLIENTSECRET_SOURCE"
-    "BW_PASS_SOURCE"
     "BW_SERVER_DEST"
     "BW_ACCOUNT_DEST"
+  )
+  
+  # Secret variables (can be set via plain env var, file, or encrypted file)
+  local required_secret_vars=(
+    "BW_PASS_SOURCE"
+    "BW_PASS_DEST"
+    "BW_CLIENTID_SOURCE"
+    "BW_CLIENTSECRET_SOURCE"
     "BW_CLIENTID_DEST"
     "BW_CLIENTSECRET_DEST"
-    "BW_PASS_DEST"
     "BW_TAR_PASS"
   )
   
   local missing_vars=()
-  for var in "${required_vars[@]}"; do
+  
+  # Check plain variables
+  for var in "${required_plain_vars[@]}"; do
     if [ -z "${!var:-}" ]; then
       missing_vars+=("$var")
     fi
   done
   
+  # Check secret variables (at least one form must be available)
+  for var in "${required_secret_vars[@]}"; do
+    local enc_file_var="${var}_ENC_FILE"
+    local keyfile_var="${var}_KEYFILE"
+    local file_var="${var}_FILE"
+    
+    local has_plain="${!var:+1}"
+    local has_file="${!file_var:+1}"
+    local has_encrypted="0"
+    
+    # Encrypted form requires both _ENC_FILE and _KEYFILE
+    if [ -n "${!enc_file_var:-}" ] && [ -n "${!keyfile_var:-}" ]; then
+      has_encrypted="1"
+    fi
+    
+    # Check if at least one form is available
+    if [ -z "$has_plain" ] && [ -z "$has_file" ] && [ "$has_encrypted" = "0" ]; then
+      missing_vars+=("$var (or ${var}_FILE or ${var}_ENC_FILE+${var}_KEYFILE)")
+    fi
+  done
+  
   if [ ${#missing_vars[@]} -gt 0 ]; then
-    echo "ERROR: The following required environment variables are not set:" >&2
+    echo "ERROR: The following required variables are not configured:" >&2
     printf '  - %s\n' "${missing_vars[@]}" >&2
     echo "" >&2
-    echo "Please set these variables via:" >&2
+    echo "Set these via one of:" >&2
     echo "  1. Environment file (--env-file option)" >&2
     echo "  2. Individual -e flags when running the container" >&2
-    echo "  3. In docker-compose.yml environment section" >&2
+    echo "  3. Docker secrets (VAR_FILE=/run/secrets/...)" >&2
+    echo "  4. Encrypted files (VAR_ENC_FILE=... + VAR_KEYFILE=...)" >&2
+    echo "  5. In docker-compose.yml environment section" >&2
     return 1
   fi
 }
