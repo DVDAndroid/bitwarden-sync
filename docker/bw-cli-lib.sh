@@ -12,17 +12,17 @@ reinstall_bw_old() {
   bw_old_ver="$1"
   bw_old_tmp="/opt/.bw-old.new"
 
-  npm install -g "@bitwarden/cli@$bw_old_ver" >/dev/null 2>&1 || return 1
+  npm --prefix /app/.npm-global install "@bitwarden/cli@$bw_old_ver" >/dev/null 2>&1 || return 1
   rm -rf "$bw_old_tmp" || return 1
   mkdir -p "$bw_old_tmp" || return 1
-  cp -r /usr/local/lib/node_modules/@bitwarden/cli "$bw_old_tmp/" || return 1
-  cp -r /usr/local/lib/node_modules "$bw_old_tmp/node_modules" || return 1
+  cp -r /app/.npm-global/lib/node_modules/@bitwarden/cli "$bw_old_tmp/" || return 1
+  cp -r /app/.npm-global/lib/node_modules "$bw_old_tmp/node_modules" || return 1
   rm -rf /opt/bw-old || return 1
   mv "$bw_old_tmp" /opt/bw-old || return 1
 
-  # The install above left the global CLI at the source version; restore the
-  # destination ("new") CLI to its intended version.
-  npm install -g "@bitwarden/cli@${BW_CLI_NEW_VERSION:-latest}" >/dev/null 2>&1 || return 1
+  # The install above left the destination CLI at the source version; restore
+  # the destination ("new") CLI to its intended version.
+  reinstall_bw_new "${BW_CLI_NEW_VERSION:-latest}" >/dev/null 2>&1 || return 1
 }
 
 # Reinstall the global "new" CLI (used for the Bitwarden cloud destination) at
@@ -30,5 +30,5 @@ reinstall_bw_old() {
 # reinstall is all that's needed; the isolated bw-old under /opt is untouched.
 #   $1 = exact Bitwarden CLI version to install for bw-new (e.g. 2025.12.0)
 reinstall_bw_new() {
-  npm install -g "@bitwarden/cli@$1" >/dev/null 2>&1 || return 1
+  npm --prefix /app/.npm-global install "@bitwarden/cli@$1" >/dev/null 2>&1 || return 1
 }

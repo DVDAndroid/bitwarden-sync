@@ -35,7 +35,7 @@ reconcile_clis() {
     reinstall_bw_old "$old_want" || return 1
   elif [ "$new_change" = 1 ]; then
     echo "# Reinstalling destination Bitwarden CLI: $new_have -> $new_want #"
-    npm install -g "@bitwarden/cli@$new_want" >/dev/null 2>&1 || return 1
+    reinstall_bw_new "$new_want" >/dev/null 2>&1 || return 1
   fi
 
   echo "# Bitwarden CLI versions: source $(bw-old --version 2>/dev/null), destination $(bw-new --version 2>/dev/null) #"

@@ -369,13 +369,15 @@ resolve_secret() {
 BW_TAR_PASS=$(resolve_secret BW_TAR_PASS)
 BW_PASS_SOURCE=$(resolve_secret BW_PASS_SOURCE)
 BW_PASS_DEST=$(resolve_secret BW_PASS_DEST)
+BW_CLIENTID_SOURCE=$(resolve_secret BW_CLIENTID_SOURCE)
+BW_CLIENTSECRET_SOURCE=$(resolve_secret BW_CLIENTSECRET_SOURCE)
 
 echo "### Bitwarden Script - Start ###"
 echo "# Start Time: $START_TIME #"
 echo "################################"
 
-export BW_CLIENTID=${BW_CLIENTID_SOURCE}
-export BW_CLIENTSECRET=${BW_CLIENTSECRET_SOURCE}
+export BW_CLIENTID="$BW_CLIENTID_SOURCE"
+export BW_CLIENTSECRET="$BW_CLIENTSECRET_SOURCE"
 
 # Check if HEALTHCHECK_URL and HEALTHCHECK_PING are set
 if [ -n "$HEALTHCHECK_URL" ] && [ -n "$HEALTHCHECK_PING" ]; then
@@ -456,8 +458,10 @@ unset BW_CLIENTID
 unset BW_CLIENTSECRET
 
 # Export/Restore to Destination Bitwarden
-export BW_CLIENTID=${BW_CLIENTID_DEST}
-export BW_CLIENTSECRET=${BW_CLIENTSECRET_DEST}
+BW_CLIENTID_DEST=$(resolve_secret BW_CLIENTID_DEST)
+BW_CLIENTSECRET_DEST=$(resolve_secret BW_CLIENTSECRET_DEST)
+export BW_CLIENTID="$BW_CLIENTID_DEST"
+export BW_CLIENTSECRET="$BW_CLIENTSECRET_DEST"
 
 if ! resolve_destination_urls; then
   exit 1

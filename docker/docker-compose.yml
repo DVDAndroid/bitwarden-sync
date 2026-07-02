@@ -11,6 +11,14 @@ services:
     #     BW_CLI_OLD_VERSION: 2025.12.0   # source / Vaultwarden compatibility
     #     BW_CLI_NEW_VERSION: 2025.12.0   # destination / Bitwarden cloud
     restart: always
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /var/run
     environment:
       - CRON_SCHEDULE=0 0 * * *
       # Run one sync immediately on container start (handy for first-run/testing),

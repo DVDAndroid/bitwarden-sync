@@ -1,14 +1,41 @@
 # Alpine base image. Pinned for reproducible builds; Renovate keeps it current.
-FROM alpine:3.24
+FROM alpine:3.25.3@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
 
 # Set working directory
 WORKDIR /app
 
-# Install required packages
-RUN apk --no-cache add python3 curl bash ca-certificates openssl ncurses coreutils make gcc g++ libgcc linux-headers grep util-linux binutils findutils uuidgen nodejs npm wget unzip tar openssl jq bash
+# Create a dedicated unprivileged runtime user and writable directories.
+RUN addgroup -S bitwarden-sync && adduser -S -D -H -G bitwarden-sync -u 10001 bitwarden-sync && \
+    mkdir -p /app/data /app/backups /app/.npm-global /var/spool/cron/crontabs /var/log && \
+    chown -R bitwarden-sync:bitwarden-sync /app /var/spool/cron /var/log
 
-# Suppress Node.js deprecation warnings
-ENV NODE_OPTIONS="--no-deprecation"
+# Install required packages. Build tooling is intentionally omitted to reduce
+# the image footprint and attack surface.
+RUN apk --no-cache add \
+    bash \
+    binutils \
+    ca-certificates \
+    coreutils \
+    curl \
+    findutils \
+    grep \
+    jq \
+    ncurses \
+    nodejs \
+    npm \
+    openssl \
+    python3 \
+    tar \
+    unzip \
+    util-linux \
+    uuidgen \
+    wget
+
+# Suppress Node.js deprecation warnings and keep npm installs in a writable
+# location for the non-root runtime user.
+ENV NODE_OPTIONS="--no-deprecation" \
+    NPM_CONFIG_PREFIX=/app/.npm-global \
+    PATH=/app/.npm-global/bin:${PATH}
 
 # Bitwarden CLI versions. Override at build time with --build-arg, or at runtime
 # by setting the matching env var (the entrypoint reconciles a concrete version
@@ -30,35 +57,42 @@ ENV BW_CLI_OLD_VERSION=${BW_CLI_OLD_VERSION} \
 # Install both versions of Bitwarden CLI in separate locations.
 # Install the pinned "old" CLI into an isolated path for the source, then the
 # "new" CLI globally for the destination.
+# NOTE: with NPM_CONFIG_PREFIX=/app/.npm-global, global installs land under
+# /app/.npm-global/lib/node_modules (NOT /usr/local/lib/node_modules).
 RUN npm install -g semver && \
     npm install -g @bitwarden/cli@${BW_CLI_OLD_VERSION} && \
     mkdir -p /opt/bw-old && \
-    cp -r /usr/local/lib/node_modules/@bitwarden/cli /opt/bw-old/ && \
-    cp -r /usr/local/lib/node_modules /opt/bw-old/node_modules && \
-    npm install -g @bitwarden/cli@${BW_CLI_NEW_VERSION}
+    cp -r /app/.npm-global/lib/node_modules/@bitwarden/cli /opt/bw-old/ && \
+    cp -r /app/.npm-global/lib/node_modules /opt/bw-old/node_modules && \
+    npm install -g @bitwarden/cli@${BW_CLI_NEW_VERSION} && \
+    chown -R bitwarden-sync:bitwarden-sync /app/.npm-global /opt/bw-old
 
 # Create wrapper scripts for both versions
 RUN echo '#!/bin/sh' > /usr/local/bin/bw-old && \
     echo 'NODE_PATH=/opt/bw-old/node_modules exec node /opt/bw-old/cli/build/bw.js "$@"' >> /usr/local/bin/bw-old && \
-    chmod +x /usr/local/bin/bw-old && \
-    ln -s $(which bw) /usr/local/bin/bw-new
+    chmod 0755 /usr/local/bin/bw-old && \
+    ln -sf "$(which bw)" /usr/local/bin/bw-new
 
 # Define a default cron schedule
 ENV CRON_SCHEDULE="57 23 * * *"
 
 # Create a cron job file with the defined schedule
-RUN echo "$CRON_SCHEDULE root /app/script.sh > /var/log/cron.log 2>&1" > /etc/crontabs/root
+RUN printf '%s bitwarden-sync /app/script.sh > /var/log/cron.log 2>&1\n' "$CRON_SCHEDULE" > /var/spool/cron/crontabs/bitwarden-sync && \
+    chmod 0600 /var/spool/cron/crontabs/bitwarden-sync && \
+    chown bitwarden-sync:bitwarden-sync /var/spool/cron/crontabs/bitwarden-sync
 
 # Copy your script, entrypoint, shared CLI helpers, and encryption files
-COPY docker/bitwarden_sync.sh /app/script.sh
-COPY docker/entrypoint.sh /app/entrypoint.sh
-COPY docker/bw-cli-lib.sh /app/bw-cli-lib.sh
+COPY --chown=bitwarden-sync:bitwarden-sync docker/bitwarden_sync.sh /app/script.sh
+COPY --chown=bitwarden-sync:bitwarden-sync docker/entrypoint.sh /app/entrypoint.sh
+COPY --chown=bitwarden-sync:bitwarden-sync docker/bw-cli-lib.sh /app/bw-cli-lib.sh
 
 # Make your scripts executable
-RUN chmod +x /app/script.sh /app/entrypoint.sh
+RUN chmod 0755 /app/script.sh /app/entrypoint.sh
 
 # The entrypoint reconciles CLI versions (if overridden) then execs the CMD.
 ENTRYPOINT ["/app/entrypoint.sh"]
 
 # Start cron and log output to console
-CMD ["sh", "-c", "echo \"$CRON_SCHEDULE /app/script.sh > /proc/1/fd/1 2>&1\" > /etc/crontabs/root && crond -f -L /dev/stdout"]
+CMD ["sh", "-c", "crond -f -L /dev/stdout -c /var/spool/cron/crontabs"]
+
+USER bitwarden-sync
