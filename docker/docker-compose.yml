@@ -11,7 +11,7 @@ services:
     #     BW_CLI_OLD_VERSION: 2025.12.0   # source / Vaultwarden compatibility
     #     BW_CLI_NEW_VERSION: 2025.12.0   # destination / Bitwarden cloud
     restart: always
-    user: "10001:10001"
+    user: "1000:1000"
     cap_drop:
       - ALL
     security_opt:

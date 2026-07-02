@@ -5,7 +5,7 @@ FROM alpine:3.25.3@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952
 WORKDIR /app
 
 # Create a dedicated unprivileged runtime user and writable directories.
-RUN addgroup -S bitwarden-sync && adduser -S -D -H -G bitwarden-sync -u 10001 bitwarden-sync && \
+RUN addgroup -S bitwarden-sync && adduser -S -D -H -G bitwarden-sync -u 1000 bitwarden-sync && \
     mkdir -p /app/data /app/backups /app/.npm-global /var/spool/cron/crontabs /var/log && \
     chown -R bitwarden-sync:bitwarden-sync /app /var/spool/cron /var/log
 
