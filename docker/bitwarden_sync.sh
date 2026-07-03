@@ -485,10 +485,10 @@ if [ ! -d "$TMP_VARS_DIR" ] || [ ! -w "$TMP_VARS_DIR" ]; then
 fi
 SOURCE_OUTPUT_FILE_JSON="$TMP_VARS_DIR/${SOURCE_EXPORT_OUTPUT_BASE}${TIMESTAMP}.json"
 
-echo "# Deleting previous backups older than 30 days... #"
-# Remove encrypted archives older than 30 days
-find /app/backups -type f -name "bw_export_*.tar.gz.enc" -mtime +30 -exec rm -f {} +
-find /app/backups -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -mtime +30 -exec rm -f {} + 2>/dev/null || true
+echo "# Deleting previous backups older than 7 days... #"
+# Remove encrypted archives older than 7 days
+find /app/backups -type f -name "bw_export_*.tar.gz.enc" -mtime +7 -exec rm -f {} +
+find /app/backups -type f -name "${SOURCE_EXPORT_OUTPUT_BASE}*.json" -mtime +7 -exec rm -f {} + 2>/dev/null || true
 
 # Login to our Server (using old CLI for Vaultwarden compatibility) and unlock.
 # source_login_unlock handles logout/config/login/unlock with retry + backoff.
